@@ -112,20 +112,21 @@ LANAIP_image_recon_and_analysis/
 ├── .gitignore               # Git ignore rules
 ├── setup.py                 # Package installation script
 ├── requirements.txt         # Python dependencies
-├── lanaip/                  # Main package
-│   ├── __init__.py
-│   ├── reconstruction/      # Reconstruction tools
+├── src/                     # Source code directory
+│   ├── lanaip/              # Main package
 │   │   ├── __init__.py
-│   │   ├── lm2sinogram.py  # List mode to sinogram converter
-│   │   └── stir_wrapper.py # STIR interface
-│   ├── analysis/           # Analysis tools
-│   │   ├── __init__.py
-│   │   └── image_analysis.py
-│   └── utils/              # Utility functions
-│       ├── __init__.py
-│       └── io_utils.py
-├── c_extensions/           # C code extensions
-│   └── README.md
+│   │   ├── reconstruction/  # Reconstruction tools
+│   │   │   ├── __init__.py
+│   │   │   ├── lm2sinogram.py  # List mode to sinogram converter
+│   │   │   └── stir_wrapper.py # STIR interface
+│   │   ├── analysis/       # Analysis tools
+│   │   │   ├── __init__.py
+│   │   │   └── image_analysis.py
+│   │   └── utils/          # Utility functions
+│   │       ├── __init__.py
+│   │       └── io_utils.py
+│   └── c_extensions/       # C code extensions
+│       └── README.md
 ├── examples/               # Example scripts
 │   ├── reconstruction_example.py
 │   └── analysis_example.py

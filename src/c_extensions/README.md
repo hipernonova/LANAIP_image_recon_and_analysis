@@ -26,7 +26,7 @@ Future implementations will use tools like:
 ## Example Structure
 
 ```
-c_extensions/
+src/c_extensions/
 ├── README.md
 ├── src/
 │   ├── fast_histogram.c
