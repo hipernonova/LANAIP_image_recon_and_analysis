@@ -90,6 +90,7 @@ def parse_event_v2(raw: bytes):
 # ---------------------------
 # Geaometría del scanner
 # ---------------------------
+span = 5
 modules_per_ring = 8
 num_rings = 3
 total_modules = modules_per_ring * num_rings
@@ -101,8 +102,13 @@ ring_gap = 3
 module_bin_x = int(crys_module // rebin_x)
 module_bin_y = int(crys_module // rebin_y)
 axial_fov = 150
-bins_axial = int(2*sum(range(int(num_rings * module_bin_y+(num_rings-1)*ring_gap))) + (num_rings * module_bin_y+(num_rings-1)*ring_gap)) 
-segments = 2 * axial_fov - 1 
+segments = np.floor((2 * axial_fov /span) )
+half = int(np.ceil(segments / 2))
+bins_axial = 0
+max_ring = (half-1)*span + np.floor(span/2)
+for s in range(-half, half + 1):
+    bins_axial += 2*(axial_fov - abs(s * span)) + np.ceil(span/2) #- 2*(span-(axial_fov-max_ring))
+bins_axial = int(bins_axial - np.ceil(span/2) - 1 )#+ (span-(axial_fov-max_ring)))
 module_size = 48.0
 ring_radius = 117.0/2
 crystal_size = module_size / module_bin_x 
@@ -235,13 +241,28 @@ def build_sinogram_and_hitmap(lm_path, force_v2=False, force_v1=False):
                 global_y1 = (ring2 * module_size + (ring2*ring_gap) + module_size - module_size*local_y2_bin/module_bin_y)
              
             ring_dif = global_y2 - global_y1
-            
-            if ring_dif <= 0:
-                bin_axial = int(sum(range(int(num_rings*module_size+(num_rings-1)*ring_gap+ring_dif))) + global_y2)
+            bin_axial = 0
+            if abs(ring_dif) <=np.floor(span/2):
+                seg = 0
             else:
-                bin_axial = int(bins_axial - (sum(range(int(num_rings*module_size+(num_rings-1)*ring_gap-ring_dif)))) - (int(num_rings*module_size+(num_rings-1)*ring_gap-ring_dif-global_y1-1))) -1
-            
-             
+                if ring_dif < 0:
+                    seg = int(np.floor((ring_dif+np.floor(span/2))/span))
+                else:
+                    seg = int(np.ceil((ring_dif-np.floor(span/2))/span))
+            if seg == -half:
+                bin_axial=0
+            else:
+                for s in range(-half+1, seg):
+                    bin_axial += 2*(axial_fov - (abs(s-1))* span) + np.ceil(span/2)
+            if seg > 0:
+                bin_axial = int(bin_axial - 1 - np.ceil(span/2) )    
+            if seg == 0:
+                bin_axial =  int(bin_axial + global_y1 + global_y2)  #agregado +1
+            elif seg>0:
+                bin_axial =  int(bin_axial + global_y1 + global_y2 - (-np.ceil(span/2) + (abs(seg-1)*span )) +1)#(-np.ceil(span/2) + (abs(seg-1)*span )) ) #saco +1
+            else:
+                bin_axial =  int(bin_axial + global_y1 + global_y2 - (2*np.ceil(span/2) + (abs(seg+1)*span )) +1)  #(2*np.ceil(span/2) + (abs(seg+1)*span )) )  
+
             sino[bin_axial, view_idx_inf, tang_inf] += w_view_inf*w_tang_inf*amount
             sino[bin_axial, view_idx_sup, tang_inf] += w_view_sup*w_tang_inf*amount
             sino[bin_axial, view_idx_inf, tang_sup] += w_view_inf*w_tang_sup*amount
@@ -258,6 +279,7 @@ def build_sinogram_and_hitmap(lm_path, force_v2=False, force_v1=False):
                 hitmap[reb_y1, reb_x1] += 1
             if 0 <= reb_x2 < modules_per_ring * module_bin_x and 0 <= reb_y2 < num_rings * module_bin_y:
                 hitmap[reb_y2, reb_x2] += 1
+    sino = sino[int((axial_fov-max_ring)):int(bins_axial-(axial_fov-max_ring)),:,:]            
     return sino, hitmap, header            
                 
 
@@ -283,10 +305,13 @@ def write_stir_files(outbase, sino):
     with open(s_direct, "wb") as f:
         sino[bins_axial//2-75:bins_axial//2+75,:,:].astype(np.float32).tofile(f)    
     # --- Write .hs header ---
-    seg_min = [i - (segments // 2) for i in range(segments)]
-    seg_max = seg_min
-    ax_coord =[i+1 if i < (num_rings*module_bin_y+ (num_rings-1)*3.0) else int(2*(num_rings*module_bin_y+ (num_rings-1)*3.0)-i-1) for i in range(segments)]
-
+    seg_min = [int(-axial_fov+1) if s ==-half else int(-np.floor(span/2)-span*(-s)) if s<=0 else int(np.ceil(span/2)+span*(s-1)) for s in range(-half, half+1)]
+    seg_min = seg_min[1:-1]
+    seg_max = [int(-np.ceil(span/2)-span*(-s-1)) if s<0 else int(np.floor(span/2)+span*s) if s<half else int(axial_fov-1) for s in range(-half, half+1)]
+    seg_max = seg_max[1:-1]
+    ax_coord =[int(2*(axial_fov - abs(s)* span) + np.ceil(span/2))  if s!= 0 else int(2*axial_fov-1) for s in range(-half, half+1)]
+    ax_coord = ax_coord[1:-1]
+    
     with open(hsfile, "w") as f:
         f.write("!INTERFILE :=\n")
         f.write("!imaging modality := PT\n")
@@ -304,16 +329,16 @@ def write_stir_files(outbase, sino):
         f.write("!number of bytes per pixel := 4\n")
         f.write("number of dimensions := 4\n")
         f.write("matrix axis label [4] := segment\n")
-        f.write(f"!matrix size [4] := {segments}\n")
+        f.write(f"!matrix size [4] := {segments-1}\n")
         f.write("matrix axis label [3] := axial coordinate\n")
-        f.write("!matrix size [3] := { " + ",".join(map(str, ax_coord)) + " }\n")
+        f.write("!matrix size [3] := { " + ",".join(map(str, (ax_coord))) + " }\n")
         f.write("matrix axis label [2] := view\n")
         f.write(f"!matrix size [2] := {sino.shape[1]}\n")
         f.write("matrix axis label [1] := tangential coordinate\n")
         f.write(f"!matrix size [1] := {sino.shape[2]}\n")
 
-        f.write("minimum ring difference per segment := { " + ",".join(map(str, seg_min)) + " }\n")
-        f.write("maximum ring difference per segment := { " + ",".join(map(str, seg_max)) + " }\n")
+        f.write("minimum ring difference per segment := { " + ",".join(map(str, (seg_min))) + " }\n")
+        f.write("maximum ring difference per segment := { " + ",".join(map(str, (seg_max))) + " }\n")
 
         f.write("Scanner parameters :=\n")
         f.write("Scanner type := Albira\n")

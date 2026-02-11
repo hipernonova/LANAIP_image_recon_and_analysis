@@ -9,7 +9,7 @@ Qué hace:
  - Escribe los archivos compatibles con MRIcro (.hdr/.img)
  - Plotea un mapa de los módilos/eventos detectados (hitmap). Usado para ver que lee bien los eventos y los posiciona
  - Progress bar porque a vecer tarda un poco y no hay paciencia
- - Hay un grafico para pasar los segmentos del sinograma (colorbar en log para no tener que poner algo con colores)
+ - Hay un grafico para pasar los sinogramas (colorbar en log para no tener que poner algo con colores)
 """
 
 import os
@@ -32,14 +32,17 @@ fmt_v2 = "<dfffHHHHHH"        # 32 bytes
 size_v2 = struct.calcsize(fmt_v2)
 
 class lm_header:
-    def __init__(self, raw: bytes):
+   def __init__(self, raw: bytes):
         if len(raw) < header_size:
-            raise ValueError("Header too short")
-        self.identifier = raw[0:16].decode("latin1", errors="replace").rstrip("\x00")
+            raise ValueError(f"Header too short ({len(raw)} bytes), expected {header_size}")
+
+        # Offsets follow the table you supplied (all little-endian)
+        # Note: using latin1 decode keeps bytes 0..255 without errors
+        self.identifier = raw[0:16].decode("utf8", errors="ignore").rstrip("\x00")
         self.rawCounts = struct.unpack("<d", raw[16:24])[0]
         self.acqTime = struct.unpack("<d", raw[24:32])[0]
         self.activity = struct.unpack("<d", raw[32:40])[0]
-        self.isotope = raw[40:56].decode("latin1", errors="replace").rstrip("\x00")
+        self.isotope = raw[40:56].decode("utf8", errors="ignore").rstrip("\x00")
         self.detectorSizeX = struct.unpack("<d", raw[56:64])[0]
         self.detectorSizeY = struct.unpack("<d", raw[64:72])[0]
         self.startTime = struct.unpack("<d", raw[72:80])[0]
@@ -49,14 +52,24 @@ class lm_header:
         self.ringDistance = struct.unpack("<d", raw[96:104])[0]
         self.detectorDistance = struct.unpack("<d", raw[104:112])[0]
         self.isotopeHalfLife = struct.unpack("<d", raw[112:120])[0]
+        # reserved: 32 bytes (120..151)
         self.reserved = raw[120:152]
+        # version: 2 bytes (152..153)
         self.version_bytes = raw[152:154]
+        # reserved 2 bytes (154..155)
         self.reserved2 = raw[154:156]
+        # gatePeriod double (156..163)
         self.gatePeriod = struct.unpack("<d", raw[156:164])[0]
+        # reserved 12 bytes at the end (164..175) -> ignored
         self.reserved3 = raw[164:176]
 
-    def is_v2(self):
-        return self.version_bytes[0] > 5
+   def is_v2(self):
+        """Follow the original C++ detection: v2 only when version[0] == 6."""
+        return self.version_bytes[0] > 5# 6
+
+   def version_major(self):
+        return self.version_bytes[0]
+
 
 def parse_event_v1(raw: bytes):
     if len(raw) != size_v1:
@@ -101,8 +114,8 @@ ring_gap = 3
 module_bin_x = int(crys_module // rebin_x)
 module_bin_y = int(crys_module // rebin_y)
 axial_fov = 150
-bins_axial = int(2*sum(range(int(num_rings * module_bin_y+(num_rings-1)*ring_gap))) + (num_rings * module_bin_y+(num_rings-1)*ring_gap)) 
-segments = 2 * axial_fov - 1 
+bins_axial = axial_fov
+segments = 2 * (module_bin_y*num_rings) - 1 
 module_size = 48.0
 ring_radius = 117.0/2
 crystal_size = module_size / module_bin_x 
@@ -110,6 +123,7 @@ transaxial_fov = 90
 bins_views =   int(module_size*modules_per_ring/2 +1)
 bins_tang = int(round(transaxial_fov/crystal_size)) +1  #90 mm FOV transaxial
 energy_resol = 0.17
+
 
 pair_map = {0:(0,4),1:(1,5),2:(2,6),3:(3,7),4:(0,3),5:(0,5),6:(1,4),7:(1,6),
 8:(2,5),9:(2,7),10:(3,6),11:(4,7),12:(8,12),13:(9,13),14:(10,14),
@@ -150,6 +164,7 @@ def detector_xy_mm(module_index, x_crystal):
     Y = Y_mod - local_x_mm * crystal_size * math.sin(theta_mod)    
     return X, Y, ring
 
+
 def lor_view(x1, y1, x2, y2):
     dx = x2 - x1
     dy = y2 - y1
@@ -184,14 +199,15 @@ def lor_view(x1, y1, x2, y2):
    
     if tang_inf >=0 and tang_sup < bins_tang:
         return view_idx_inf, view_idx_sup, w_view_inf, w_view_sup, tang_inf,tang_sup,w_tang_inf,w_tang_sup, swap
+    #return view_bin, tang_bin, swap
 
 # ---------------------------
 # Sinograma y visualizador
 # ---------------------------
-def build_sinogram_and_hitmap(lm_path, force_v2=False, force_v1=False):
+def build_sinogram_and_hitmap(lm_path, bin_span, force_v2=False, force_v1=False):
+    
     sino = np.zeros((bins_axial, bins_views, bins_tang), dtype=np.float32)
     hitmap = np.zeros((num_rings * module_bin_y + (num_rings-1)*ring_gap, modules_per_ring * module_bin_x), dtype=np.int32)
-
     with open(lm_path, "rb") as f:
         raw_header = f.read(header_size)
         header = lm_header(raw_header)
@@ -211,7 +227,7 @@ def build_sinogram_and_hitmap(lm_path, force_v2=False, force_v1=False):
             except Exception:
                 continue
             pair = int(ev["pair"]) 
-            amount = ev["amount"]
+            amount = ev["amount"] #/(math.pi*(ring_radius/10)**2*axial_fov/10)
             if (pair & singles_flag) != 0: continue
             if pair not in pair_map: continue
             mA, mB = pair_map[pair]
@@ -226,7 +242,7 @@ def build_sinogram_and_hitmap(lm_path, force_v2=False, force_v1=False):
             vt = lor_view(X1, Y1, X2, Y2)
             if vt is None: continue
             view_idx_inf, view_idx_sup, w_view_inf, w_view_sup, tang_inf,tang_sup,w_tang_inf,w_tang_sup, swap = vt
-            
+            #view_idx, tang_ind, swap = vt
             if swap == 0:
                 global_y1 = (ring1 * module_size + (ring1*ring_gap) + module_size - module_size*local_y1_bin/module_bin_y)
                 global_y2 = (ring2 * module_size + (ring2*ring_gap) + module_size - module_size*local_y2_bin/module_bin_y)
@@ -234,19 +250,42 @@ def build_sinogram_and_hitmap(lm_path, force_v2=False, force_v1=False):
                 global_y2 = (ring1 * module_size + (ring1*ring_gap) + module_size - module_size*local_y1_bin/module_bin_y)
                 global_y1 = (ring2 * module_size + (ring2*ring_gap) + module_size - module_size*local_y2_bin/module_bin_y)
              
+            #event_1_axial[ring1*300+300-y1_cr-1] = event_1_axial[ring1*300+300-y1_cr-1]+1
+            #event_2_axial[ring2*300+300-y2_cr-1] = event_2_axial[ring2*300+300-y2_cr-1]+1
+            
             ring_dif = global_y2 - global_y1
             
-            if ring_dif <= 0:
-                bin_axial = int(sum(range(int(num_rings*module_size+(num_rings-1)*ring_gap+ring_dif))) + global_y2)
-            else:
-                bin_axial = int(bins_axial - (sum(range(int(num_rings*module_size+(num_rings-1)*ring_gap-ring_dif)))) - (int(num_rings*module_size+(num_rings-1)*ring_gap-ring_dif-global_y1-1))) -1
-            
-             
-            sino[bin_axial, view_idx_inf, tang_inf] += w_view_inf*w_tang_inf*amount
-            sino[bin_axial, view_idx_sup, tang_inf] += w_view_sup*w_tang_inf*amount
-            sino[bin_axial, view_idx_inf, tang_sup] += w_view_inf*w_tang_sup*amount
-            sino[bin_axial, view_idx_sup, tang_sup] += w_view_sup*w_tang_sup*amount
+            if abs(ring_dif) <= bin_span:
+                
+                #axial_bin = int(round((global_y1 + global_y2)/2)) -1 
+                mid_axial = (global_y1 + global_y2)/2
+                if mid_axial.is_integer():
+                    axial_bin = int(mid_axial) -1
+                    sino[axial_bin, view_idx_inf, tang_inf] += 1*w_view_inf*w_tang_inf*amount
+                    sino[axial_bin, view_idx_sup, tang_inf] += 1*w_view_sup*w_tang_inf*amount
+                    sino[axial_bin, view_idx_inf, tang_sup] += 1*w_view_inf*w_tang_sup*amount
+                    sino[axial_bin, view_idx_sup, tang_sup] += 1*w_view_sup*w_tang_sup*amount
+                    #sino[axial_bin, view_idx, tang_ind] += 1
+                else:
+                    lower_bin = int(np.floor(mid_axial))-1
+                    upper_bin = int(np.ceil(mid_axial))-1
+                    w_axial_inf = -((upper_bin - mid_axial))
+                    w_axial_sup =  ((mid_axial - lower_bin -1))
                     
+                    sino[lower_bin, view_idx_inf, tang_inf] += w_axial_inf*w_view_inf*w_tang_inf*amount
+                    sino[upper_bin, view_idx_inf, tang_inf] += w_axial_sup*w_view_inf*w_tang_inf*amount
+                    sino[lower_bin, view_idx_sup, tang_inf] += w_axial_inf*w_view_sup*w_tang_inf*amount
+                    sino[upper_bin, view_idx_sup, tang_inf] += w_axial_sup*w_view_sup*w_tang_inf*amount
+                    sino[lower_bin, view_idx_inf, tang_sup] += w_axial_inf*w_view_inf*w_tang_sup*amount
+                    sino[upper_bin, view_idx_inf, tang_sup] += w_axial_sup*w_view_inf*w_tang_sup*amount
+                    sino[lower_bin, view_idx_sup, tang_sup] += w_axial_inf*w_view_sup*w_tang_sup*amount
+                    sino[upper_bin, view_idx_sup, tang_sup] += w_axial_sup*w_view_sup*w_tang_sup*amount
+                    #sino[lower_bin, view_idx, tang_ind] += 1-(mid_axial - lower_bin)
+                    #sino[upper_bin, view_idx, tang_ind] += 1-(upper_bin - mid_axial)
+                    
+            else: continue
+            
+            
             # hitmap
             ringA, modA = module_ring(mA)
             ringB, modB = module_ring(mB)
@@ -258,6 +297,13 @@ def build_sinogram_and_hitmap(lm_path, force_v2=False, force_v1=False):
                 hitmap[reb_y1, reb_x1] += 1
             if 0 <= reb_x2 < modules_per_ring * module_bin_x and 0 <= reb_y2 < num_rings * module_bin_y:
                 hitmap[reb_y2, reb_x2] += 1
+                
+    #plt.plot(event_1_axial, label='Event 1')
+    #plt.plot(event_2_axial, label='Event 2')
+    #plt.xlabel('Axial position (bins)')
+    #plt.ylabel('Counts')
+    #plt.legend()
+    #plt.show()            
     return sino, hitmap, header            
                 
 
@@ -268,24 +314,13 @@ import numpy as np
 # ---------------------------
 # STIR .s/.hs
 # ---------------------------
-def write_stir_files(outbase, sino):
-    """
-    Write STIR-compatible sinogram and header files (.s / .hs)
-    sino shape expected as [segments, axial, bins_views, tangential]
-    """
-
+def write_stir_files(outbase, sino, header):
     sfile = outbase + ".s"
     hsfile = outbase + ".hs"
-    s_direct = outbase + "_directos.s"
-    # --- Write .s binary ---
+
     with open(sfile, "wb") as f:
-        sino.astype(np.float32).tofile(f)
-    with open(s_direct, "wb") as f:
-        sino[bins_axial//2-75:bins_axial//2+75,:,:].astype(np.float32).tofile(f)    
-    # --- Write .hs header ---
-    seg_min = [i - (segments // 2) for i in range(segments)]
-    seg_max = seg_min
-    ax_coord =[i+1 if i < (num_rings*module_bin_y+ (num_rings-1)*3.0) else int(2*(num_rings*module_bin_y+ (num_rings-1)*3.0)-i-1) for i in range(segments)]
+        for seg in range(sino.shape[0]):
+            sino[seg].astype(np.float32).tofile(f)
 
     with open(hsfile, "w") as f:
         f.write("!INTERFILE :=\n")
@@ -299,33 +334,29 @@ def write_stir_files(outbase, sino):
         f.write("imagedata byte order := LITTLEENDIAN\n")
         f.write("!PET STUDY (General) :=\n")
         f.write("!PET data type := Emission \n")
-        f.write("applied corrections := {arc correction} \n")
         f.write("!number format := float\n")
         f.write("!number of bytes per pixel := 4\n")
         f.write("number of dimensions := 4\n")
         f.write("matrix axis label [4] := segment\n")
-        f.write(f"!matrix size [4] := {segments}\n")
+        f.write("!matrix size [4] := 1\n")
         f.write("matrix axis label [3] := axial coordinate\n")
-        f.write("!matrix size [3] := { " + ",".join(map(str, ax_coord)) + " }\n")
+        f.write(f"!matrix size [3] := {sino.shape[0]}\n")
         f.write("matrix axis label [2] := view\n")
         f.write(f"!matrix size [2] := {sino.shape[1]}\n")
         f.write("matrix axis label [1] := tangential coordinate\n")
         f.write(f"!matrix size [1] := {sino.shape[2]}\n")
-
-        f.write("minimum ring difference per segment := { " + ",".join(map(str, seg_min)) + " }\n")
-        f.write("maximum ring difference per segment := { " + ",".join(map(str, seg_max)) + " }\n")
-
+        f.write("minimum ring difference per segment := 0 \n")
+        f.write("maximum ring difference per segment := 0\n")
         f.write("Scanner parameters :=\n")
         f.write("Scanner type := Albira\n")
-        f.write(f"Number of rings := {int(num_rings*module_bin_y+ (num_rings-1)*3.0)}\n")
+        f.write(f"Number of rings := {num_rings*module_bin_y}\n")
         f.write(f"Number of detectors per ring := {module_bin_x * modules_per_ring}\n")
         f.write(f"Inner ring diameter (cm) := {ring_radius*2/10.0:.4f}\n")
-        f.write("Average depth of interaction (cm) := 0.84 \n")
-        f.write(f"Distance between rings (cm) := {axial_fov/10/(module_size*num_rings + (num_rings-1)*3.0):.4f}\n")
-        f.write(f"Default bin size (cm) := {transaxial_fov / bins_tang/10.0:.4f}\n")
+        f.write(f"Distance between rings (cm) := {axial_fov/(module_size*num_rings + (num_rings-1)*3.0)/10:.4f}\n")
+        f.write(f"Default bin size (cm) := {transaxial_fov/bins_tang/10.0:.4f}\n")
         f.write("View offset (degrees) := 0\n")
-        f.write("Maximum number of non-arc-corrected bins := 0\n")
-        f.write(f"Default number of arc-corrected bins := {sino.shape[2]}\n")
+        f.write(f"Maximum number of non-arc-corrected bins := {modules_per_ring*module_bin_y}\n")
+        f.write(f"Default number of arc-corrected bins := {modules_per_ring*module_bin_y}\n")
         f.write(f"Energy_resolution := {energy_resol}\n")
         f.write("Reference energy (in keV) := 511\n")
         f.write("Number of blocks per bucket in transaxial direction := 1\n")
@@ -335,19 +366,52 @@ def write_stir_files(outbase, sino):
         f.write("Number of crystals per singles unit in axial direction := 1\n")
         f.write("Number of crystals per singles unit in transaxial direction := 1\n")
         f.write("Scanner geometry := Cylindrical\n")
-        f.write(f"Distance between crystals in axial direction (cm) := {axial_fov/10/(module_size*num_rings + (num_rings-1)*3.0):.4f}\n")
-        f.write(f"Distance between crystals in transaxial direction (cm) := {transaxial_fov /bins_tang/10.0:.4f}\n")
-        f.write(f"Distance between blocks in axial direction (cm) := {axial_fov/10/(module_size*num_rings + (num_rings-1)*3.0):.4f}\n")
-        f.write(f"Distance between blocks in transaxial direction (cm) := {transaxial_fov / bins_tang/10.0:.4f}\n")
+        f.write(f"Distance between crystals in axial direction (cm) := {axial_fov/(module_size*num_rings + (num_rings-1)*3.0)/10:.4f}\n")
+        f.write(f"Distance between crystals in transaxial direction (cm) := {transaxial_fov/bins_tang/10.0:.4f}\n")
+        f.write(f"Distance between blocks in axial direction (cm) := {axial_fov/(module_size*num_rings + (num_rings-1)*3.0)/10:.4f}\n")
+        f.write(f"Distance between blocks in transaxial direction (cm) := {transaxial_fov/bins_tang/10.0:.4f}\n")
 
         f.write("end scanner parameters :=\n")
-        f.write(f"effective central bin size (cm) := {transaxial_fov /bins_tang/10.0:.4f}\n")
+        f.write(f"effective central bin size (cm) := {transaxial_fov/bins_tang/10.0:.4f}\n")
         f.write("number of time frames := 1\n")
         f.write("start vertical bed position (mm) := 0\n")
         f.write("start horizontal bed position (mm) := 0\n")
         f.write("!END OF INTERFILE :=\n")
+    print(f"Creados {sfile} y {hsfile}")
+    
+    
 
-    print(f"✅ STIR sinogram files created: {sfile} and {hsfile}")
+# ---------------------------
+# MRIcro .hdr/.img
+# ---------------------------
+def write_analyze_hdr_img(basefile, xsize, ysize, zsize, data):
+    hdrfile = basefile + ".hdr"
+    imgfile = basefile + ".img"
+
+    # flatten in Fortran-like order to keep (Z,Y,X) consistent
+    data.astype(np.float32).tofile(imgfile)
+    
+    hdr = bytearray(348)
+    struct.pack_into("<i", hdr, 0, 348)  # header size
+    struct.pack_into("<hhhhhhhh", hdr, 40, 3, xsize, ysize, zsize, 1,0,0,0)
+    struct.pack_into("<h", hdr, 70, 16)  # 32-bit float
+    struct.pack_into("<h", hdr, 72, 0)   # unused
+    with open(hdrfile, "wb") as f:
+        f.write(hdr)
+    print(f"Creados {hdrfile} y {imgfile} para MRIcro")
+
+
+def save_sinogram_analyze(basefile, sino):
+    """
+    X = tangential 
+    Y = bins_views
+    Z = axial 
+    """
+    data = sino.astype(np.float32)  # (axial, bins_views, tangential)
+
+    zsize, ysize, xsize = data.shape
+    write_analyze_hdr_img(basefile, xsize, ysize, zsize, data)
+    return data
 
 
 # ---------------------------
@@ -377,12 +441,13 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("lmfile")
     parser.add_argument("outbase")
+    parser.add_argument("binSpan", type=int)
     args = parser.parse_args()
-    sino, hitmap, header = build_sinogram_and_hitmap(args.lmfile)
-    
-    #data = save_sinogram_analyze(args.outbase, sino)
+    sino, hitmap, header = build_sinogram_and_hitmap(args.lmfile, args.binSpan)
+    print(np.sum(sino,axis=0).sum(axis=0).sum(axis=0))
+    print('\n')
     print(sino.shape)
-    write_stir_files(outbase=args.outbase,sino=sino)
+    write_stir_files(outbase=args.outbase,sino=sino,header=header)
 
     counts_axial = np.sum(sino, axis=1).sum(axis=1)
     plt.plot(counts_axial)
